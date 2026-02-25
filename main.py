@@ -1,6 +1,6 @@
 """
-AstrBot 跨会话记忆插件
-让 Bot 能够跨群组/会话共享记忆，实现群组间的对话上下文互通
+AstrBot 跨会话记忆插件（基于向量嵌入）
+使用 AstrBot 内置的 Embedding Provider 实现智能记忆存储和检索
 """
 
 import json
@@ -18,19 +18,31 @@ from astrbot.api import AstrBotConfig
 
 
 @dataclass
-class MessageRecord:
-    """消息记录"""
-    role: str  # "user" 或 "assistant"
+class MemoryRecord:
+    """记忆记录"""
+    id: str
     content: str
     session_id: str
-    sender_name: str = ""
-    timestamp: str = ""
+    group_name: str
+    sender_name: str
+    role: str  # "user" 或 "assistant"
+    timestamp: str
+    embedding: Optional[List[float]] = None
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        return {
+            "id": self.id,
+            "content": self.content,
+            "session_id": self.session_id,
+            "group_name": self.group_name,
+            "sender_name": self.sender_name,
+            "role": self.role,
+            "timestamp": self.timestamp,
+            "embedding": self.embedding
+        }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "MessageRecord":
+    def from_dict(cls, data: dict) -> "MemoryRecord":
         return cls(**data)
 
 
@@ -40,21 +52,21 @@ class MemoryGroup:
     name: str
     session_ids: Set[str]
     max_history: int = 50
-    history: List[MessageRecord] = field(default_factory=list)
+    memories: List[MemoryRecord] = field(default_factory=list)
 
-    def add_message(self, record: MessageRecord):
-        """添加消息记录"""
-        self.history.append(record)
+    def add_memory(self, record: MemoryRecord):
+        """添加记忆记录"""
+        self.memories.append(record)
         # 保持历史记录在限制内
-        if len(self.history) > self.max_history:
-            self.history = self.history[-self.max_history:]
+        if len(self.memories) > self.max_history:
+            self.memories = self.memories[-self.max_history:]
 
     def to_dict(self) -> dict:
         return {
             "name": self.name,
             "session_ids": list(self.session_ids),
             "max_history": self.max_history,
-            "history": [r.to_dict() for r in self.history]
+            "memories": [r.to_dict() for r in self.memories]
         }
 
     @classmethod
@@ -63,27 +75,26 @@ class MemoryGroup:
             name=data["name"],
             session_ids=set(data.get("session_ids", [])),
             max_history=data.get("max_history", 50),
-            history=[MessageRecord.from_dict(r) for r in data.get("history", [])]
+            memories=[MemoryRecord.from_dict(r) for r in data.get("memories", [])]
         )
 
 
 @register(
     "astrbot_plugin_cross_session_memory",
     "lanxuedao",
-    "让 Bot 能够跨群组/会话共享记忆，实现群组间的对话上下文互通",
+    "让 Bot 能够跨群组/会话共享记忆，使用向量嵌入实现智能检索",
     "1.0.0",
     "https://github.com/lan-xue-dao/astrbot_plugin_cross_session_memory"
 )
 class CrossSessionMemoryPlugin(Star):
-    """跨会话记忆插件"""
+    """跨会话记忆插件（基于向量嵌入）"""
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
 
-        # 记忆组存储: session_id -> MemoryGroup
+        # 记忆组存储
         self.session_to_group: Dict[str, MemoryGroup] = {}
-        # 记忆组存储: group_name -> MemoryGroup
         self.memory_groups: Dict[str, MemoryGroup] = {}
 
         # 数据存储路径
@@ -94,13 +105,17 @@ class CrossSessionMemoryPlugin(Star):
         self._save_task: Optional[asyncio.Task] = None
         self._running = True
 
+        # 嵌入服务
+        self.embedding_provider = None
+        self.use_embedding = False
+
         # 初始化
         self._init_config()
         self._load_data()
+        self._init_embedding()
 
     def _init_config(self):
         """初始化配置"""
-        # 获取配置值
         self.enabled = self.config.get("enabled", True)
         memory_groups_config = self.config.get("memory_groups", [])
         global_settings = self.config.get("global_settings", {})
@@ -108,6 +123,9 @@ class CrossSessionMemoryPlugin(Star):
         self.auto_save_interval = global_settings.get("auto_save_interval", 60)
         self.include_sender_info = global_settings.get("include_sender_info", True)
         self.cross_group_prefix = global_settings.get("cross_group_prefix", "[{group_name}] {sender}: ")
+        self.use_embedding = global_settings.get("use_embedding", False)
+        self.top_k = global_settings.get("top_k", 5)
+        self.embedding_threshold = global_settings.get("embedding_threshold", 0.3)
 
         # 确保 memory_groups_config 是列表类型
         if not isinstance(memory_groups_config, list):
@@ -116,9 +134,8 @@ class CrossSessionMemoryPlugin(Star):
 
         # 初始化记忆组
         for group_config in memory_groups_config:
-            # 确保 group_config 是字典类型
             if not isinstance(group_config, dict):
-                logger.warning(f"[跨会话记忆] 跳过无效的记忆组配置，类型: {type(group_config)}, 值: {group_config}")
+                logger.warning(f"[跨会话记忆] 跳过无效的记忆组配置")
                 continue
 
             group_name = group_config.get("group_name", "default")
@@ -126,12 +143,10 @@ class CrossSessionMemoryPlugin(Star):
             max_history = group_config.get("max_history", 50)
 
             if group_name in self.memory_groups:
-                # 合并到现有组
                 existing_group = self.memory_groups[group_name]
                 existing_group.session_ids.update(session_ids)
                 existing_group.max_history = max_history
             else:
-                # 创建新组
                 group = MemoryGroup(
                     name=group_name,
                     session_ids=set(session_ids),
@@ -139,11 +154,61 @@ class CrossSessionMemoryPlugin(Star):
                 )
                 self.memory_groups[group_name] = group
 
-            # 建立映射
             for sid in session_ids:
                 self.session_to_group[sid] = self.memory_groups[group_name]
 
         logger.info(f"[跨会话记忆] 已加载 {len(self.memory_groups)} 个记忆组")
+
+    def _init_embedding(self):
+        """初始化嵌入服务"""
+        if not self.use_embedding:
+            logger.info("[跨会话记忆] 未启用嵌入模式，使用简单文本匹配")
+            return
+
+        try:
+            # 尝试获取嵌入服务提供商
+            embedding_provider_name = self.config.get("embedding_provider", "")
+            if embedding_provider_name:
+                self.embedding_provider = self.context.get_provider_manager().get_provider(embedding_provider_name)
+                if self.embedding_provider:
+                    logger.info(f"[跨会话记忆] 成功加载嵌入服务: {embedding_provider_name}")
+                else:
+                    logger.warning(f"[跨会话记忆] 未找到嵌入服务: {embedding_provider_name}")
+                    self.use_embedding = False
+            else:
+                logger.info("[跨会话记忆] 未配置嵌入服务提供商，使用简单文本匹配")
+                self.use_embedding = False
+        except Exception as e:
+            logger.error(f"[跨会话记忆] 初始化嵌入服务失败: {e}")
+            self.use_embedding = False
+
+    async def _get_embedding(self, text: str) -> Optional[List[float]]:
+        """获取文本的嵌入向量"""
+        if not self.use_embedding or not self.embedding_provider:
+            return None
+
+        try:
+            result = await self.embedding_provider.get_embeddings_async([text])
+            if result and len(result) > 0:
+                return result[0]
+        except Exception as e:
+            logger.error(f"[跨会话记忆] 获取嵌入向量失败: {e}")
+
+        return None
+
+    def _calculate_similarity(self, emb1: List[float], emb2: List[float]) -> float:
+        """计算两个向量的余弦相似度"""
+        if not emb1 or not emb2 or len(emb1) != len(emb2):
+            return 0.0
+
+        dot_product = sum(a * b for a, b in zip(emb1, emb2))
+        norm1 = sum(a * a for a in emb1) ** 0.5
+        norm2 = sum(b * b for b in emb2) ** 0.5
+
+        if norm1 == 0 or norm2 == 0:
+            return 0.0
+
+        return dot_product / (norm1 * norm2)
 
     def _load_data(self):
         """从文件加载数据"""
@@ -153,16 +218,14 @@ class CrossSessionMemoryPlugin(Star):
                     data = json.load(f)
 
                 memory_groups_data = data.get("memory_groups", {})
-                # 确保 memory_groups_data 是字典类型
                 if not isinstance(memory_groups_data, dict):
-                    logger.warning(f"[跨会话记忆] memory_groups 数据格式错误，预期字典，实际类型: {type(memory_groups_data)}")
+                    logger.warning(f"[跨会话记忆] memory_groups 数据格式错误")
                     return
 
                 for group_name, group_data in memory_groups_data.items():
                     if group_name in self.memory_groups:
-                        # 更新现有组的历史记录
                         loaded_group = MemoryGroup.from_dict(group_data)
-                        self.memory_groups[group_name].history = loaded_group.history
+                        self.memory_groups[group_name].memories = loaded_group.memories
 
                 logger.info(f"[跨会话记忆] 已从文件加载记忆数据")
         except Exception as e:
@@ -211,37 +274,64 @@ class CrossSessionMemoryPlugin(Star):
         """获取会话所属的记忆组"""
         return self.session_to_group.get(session_id)
 
-    def _format_cross_session_context(
+    async def _retrieve_relevant_memories(
         self,
         group: MemoryGroup,
+        query_text: str,
         current_session_id: str
+    ) -> List[MemoryRecord]:
+        """检索相关的记忆"""
+        if not self.use_embedding:
+            # 简单模式：返回最近的记忆
+            return [m for m in group.memories if m.session_id != current_session_id][-self.top_k:]
+
+        # 嵌入模式：使用向量相似度检索
+        query_embedding = await self._get_embedding(query_text)
+        if not query_embedding:
+            logger.warning("[跨会话记忆] 获取查询嵌入失败，回退到简单模式")
+            return [m for m in group.memories if m.session_id != current_session_id][-self.top_k:]
+
+        # 计算所有记忆的相似度
+        scored_memories = []
+        for memory in group.memories:
+            if memory.session_id == current_session_id:
+                continue
+
+            if memory.embedding:
+                similarity = self._calculate_similarity(query_embedding, memory.embedding)
+                if similarity >= self.embedding_threshold:
+                    scored_memories.append((similarity, memory))
+
+        # 按相似度排序并返回 top_k
+        scored_memories.sort(key=lambda x: x[0], reverse=True)
+        return [memory for _, memory in scored_memories[:self.top_k]]
+
+    async def _format_memory_context(
+        self,
+        group: MemoryGroup,
+        current_session_id: str,
+        query_text: str
     ) -> List[dict]:
-        """格式化跨会话上下文"""
+        """格式化记忆上下文"""
+        # 检索相关记忆
+        relevant_memories = await self._retrieve_relevant_memories(group, query_text, current_session_id)
+
         context = []
-
-        for record in group.history:
-            # 如果是当前会话的消息，保持原样
-            if record.session_id == current_session_id:
-                context.append({
-                    "role": record.role,
-                    "content": record.content
-                })
+        for memory in relevant_memories:
+            if self.include_sender_info:
+                prefix = self.cross_group_prefix.format(
+                    group_name=group.name,
+                    sender=memory.sender_name or "用户",
+                    time=memory.timestamp or ""
+                )
+                content = f"{prefix}{memory.content}"
             else:
-                # 跨会话消息，添加前缀
-                if self.include_sender_info:
-                    prefix = self.cross_group_prefix.format(
-                        group_name=group.name,
-                        sender=record.sender_name or "用户",
-                        time=record.timestamp or ""
-                    )
-                    content = f"{prefix}{record.content}"
-                else:
-                    content = record.content
+                content = memory.content
 
-                context.append({
-                    "role": record.role,
-                    "content": content
-                })
+            context.append({
+                "role": memory.role,
+                "content": content
+            })
 
         return context
 
@@ -257,14 +347,16 @@ class CrossSessionMemoryPlugin(Star):
         if not group:
             return
 
-        # 获取跨会话上下文
-        cross_context = self._format_cross_session_context(group, session_id)
+        # 获取当前消息文本
+        query_text = event.message_str if hasattr(event, 'message_str') else ""
 
-        if cross_context:
-            # 将跨会话上下文添加到系统提示
+        # 获取相关记忆上下文
+        memory_context = await self._format_memory_context(group, session_id, query_text)
+
+        if memory_context:
             context_str = "\n".join([
                 f"[{msg['role']}]: {msg['content']}"
-                for msg in cross_context[-20:]  # 最近20条
+                for msg in memory_context
             ])
 
             cross_memory_prompt = f"""
@@ -273,7 +365,7 @@ class CrossSessionMemoryPlugin(Star):
 {context_str}
 """
             req.system_prompt = (req.system_prompt or "") + cross_memory_prompt
-            logger.debug(f"[跨会话记忆] 已注入 {len(cross_context)} 条跨会话上下文")
+            logger.debug(f"[跨会话记忆] 已注入 {len(memory_context)} 条记忆")
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
@@ -288,14 +380,26 @@ class CrossSessionMemoryPlugin(Star):
             return
 
         # 记录用户消息
-        record = MessageRecord(
+        content = event.message_str if hasattr(event, 'message_str') else ""
+        if not content:
+            return
+
+        # 获取嵌入向量（如果启用）
+        embedding = None
+        if self.use_embedding:
+            embedding = await self._get_embedding(content)
+
+        record = MemoryRecord(
+            id=f"{session_id}_{datetime.now().timestamp()}",
             role="user",
-            content=event.message_str,
+            content=content,
             session_id=session_id,
+            group_name=group.name,
             sender_name=event.get_sender_name() or "用户",
-            timestamp=datetime.now().strftime("%H:%M")
+            timestamp=datetime.now().strftime("%H:%M"),
+            embedding=embedding
         )
-        group.add_message(record)
+        group.add_memory(record)
         logger.debug(f"[跨会话记忆] 记录用户消息: {session_id}")
 
     @filter.on_llm_response()
@@ -317,14 +421,22 @@ class CrossSessionMemoryPlugin(Star):
             content = resp.completion_text or ""
 
         if content:
-            record = MessageRecord(
+            # 获取嵌入向量（如果启用）
+            embedding = None
+            if self.use_embedding:
+                embedding = await self._get_embedding(content)
+
+            record = MemoryRecord(
+                id=f"{session_id}_bot_{datetime.now().timestamp()}",
                 role="assistant",
                 content=content,
                 session_id=session_id,
+                group_name=group.name,
                 sender_name="Bot",
-                timestamp=datetime.now().strftime("%H:%M")
+                timestamp=datetime.now().strftime("%H:%M"),
+                embedding=embedding
             )
-            group.add_message(record)
+            group.add_memory(record)
             logger.debug(f"[跨会话记忆] 记录助手回复: {session_id}")
 
     @filter.command("memory_status")
@@ -340,8 +452,9 @@ class CrossSessionMemoryPlugin(Star):
         status = f"""【跨会话记忆状态】
 记忆组: {group.name}
 组成员: {', '.join(group.session_ids)}
-历史记录数: {len(group.history)}
+记忆数量: {len(group.memories)}
 最大记录数: {group.max_history}
+嵌入模式: {'启用' if self.use_embedding else '禁用'}
 """
         yield event.plain_result(status)
 
@@ -355,9 +468,9 @@ class CrossSessionMemoryPlugin(Star):
             yield event.plain_result("当前会话未配置跨群记忆功能。")
             return
 
-        group.history.clear()
+        group.memories.clear()
         self._save_data()
-        yield event.plain_result(f"已清除记忆组 [{group.name}] 的所有历史记录。")
+        yield event.plain_result(f"已清除记忆组 [{group.name}] 的所有记忆记录。")
 
     @filter.command("memory_save")
     async def memory_save(self, event: AstrMessageEvent):
