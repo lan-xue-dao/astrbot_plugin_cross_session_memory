@@ -9,7 +9,6 @@ import asyncio
 from datetime import datetime
 from typing import Dict, List, Optional, Set
 from dataclasses import dataclass, field, asdict
-from collections import defaultdict
 
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -73,7 +72,7 @@ class MemoryGroup:
     "lanxuedao",
     "让 Bot 能够跨群组/会话共享记忆，实现群组间的对话上下文互通",
     "1.0.0",
-    "https://github.com/lanxuedao/astrbot_plugin_cross_session_memory"
+    "https://github.com/lan-xue-dao/astrbot_plugin_cross_session_memory"
 )
 class CrossSessionMemoryPlugin(Star):
     """跨会话记忆插件"""
