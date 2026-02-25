@@ -143,7 +143,13 @@ class CrossSessionMemoryPlugin(Star):
                 with open(self.data_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
 
-                for group_name, group_data in data.get("memory_groups", {}).items():
+                memory_groups_data = data.get("memory_groups", {})
+                # 确保 memory_groups_data 是字典类型
+                if not isinstance(memory_groups_data, dict):
+                    logger.warning(f"[跨会话记忆] memory_groups 数据格式错误，预期字典，实际类型: {type(memory_groups_data)}")
+                    return
+
+                for group_name, group_data in memory_groups_data.items():
                     if group_name in self.memory_groups:
                         # 更新现有组的历史记录
                         loaded_group = MemoryGroup.from_dict(group_data)
