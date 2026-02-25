@@ -109,8 +109,18 @@ class CrossSessionMemoryPlugin(Star):
         self.include_sender_info = global_settings.get("include_sender_info", True)
         self.cross_group_prefix = global_settings.get("cross_group_prefix", "[{group_name}] {sender}: ")
 
+        # 确保 memory_groups_config 是列表类型
+        if not isinstance(memory_groups_config, list):
+            logger.warning(f"[跨会话记忆] memory_groups 配置格式错误，预期列表，实际类型: {type(memory_groups_config)}")
+            memory_groups_config = []
+
         # 初始化记忆组
         for group_config in memory_groups_config:
+            # 确保 group_config 是字典类型
+            if not isinstance(group_config, dict):
+                logger.warning(f"[跨会话记忆] 跳过无效的记忆组配置，类型: {type(group_config)}, 值: {group_config}")
+                continue
+
             group_name = group_config.get("group_name", "default")
             session_ids = group_config.get("session_ids", [])
             max_history = group_config.get("max_history", 50)
