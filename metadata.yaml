@@ -3,4 +3,4 @@ display_name: 跨会话记忆
 author: lanxuedao
 description: 让 Bot 能够跨群组/会话共享记忆，实现群组间的对话上下文互通
 version: 1.0.0
-repo: https://github.com/lanxuedao/astrbot_plugin_cross_session_memory
+repo: https://github.com/lan-xue-dao/astrbot_plugin_cross_session_memory
