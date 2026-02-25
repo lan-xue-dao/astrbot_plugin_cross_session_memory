@@ -477,3 +477,201 @@ class CrossSessionMemoryPlugin(Star):
         """手动保存记忆数据"""
         self._save_data()
         yield event.plain_result("记忆数据已保存。")
+
+    # ========== 函数工具（Function Calling）支持 ==========
+
+    @filter.tool("query_memory", {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "要查询的关键词或问题，用于检索相关的记忆"
+            },
+            "limit": {
+                "type": "integer",
+                "description": "返回的记忆数量限制（可选，默认5）",
+                "default": 5
+            }
+        },
+        "required": ["query"],
+        "description": "查询跨会话记忆，检索与给定查询相关的历史对话记忆。当你需要回顾之前的对话内容或查找相关信息时使用此工具。"
+    })
+    async def query_memory(self, event: AstrMessageEvent, query: str, limit: int = 5) -> str:
+        """查询跨会话记忆"""
+        if not self.enabled:
+            return "记忆功能未启用"
+
+        session_id = event.get_session_id()
+        group = self._get_group_for_session(session_id)
+
+        if not group:
+            return "当前会话未配置跨群记忆功能"
+
+        try:
+            # 检索相关记忆
+            relevant_memories = await self._retrieve_relevant_memories(
+                group, query, session_id
+            )
+            
+            # 限制返回数量
+            relevant_memories = relevant_memories[:limit]
+
+            if not relevant_memories:
+                return f"未找到与 '{query}' 相关的记忆"
+
+            # 格式化返回结果
+            result_parts = []
+            for i, memory in enumerate(relevant_memories, 1):
+                sender = memory.sender_name or "用户"
+                time_str = memory.timestamp or "未知时间"
+                role = "用户" if memory.role == "user" else "Bot"
+                
+                result_parts.append(
+                    f"{i}. [{role}] {sender} ({time_str}):\n"
+                    f"   {memory.content}"
+                )
+
+            return f"找到 {len(relevant_memories)} 条相关记忆：\n\n" + "\n\n".join(result_parts)
+            
+        except Exception as e:
+            logger.error(f"[跨会话记忆] 查询记忆失败: {e}")
+            return f"查询记忆时出错: {str(e)}"
+
+    @filter.tool("save_memory", {
+        "type": "object",
+        "properties": {
+            "content": {
+                "type": "string",
+                "description": "要保存的记忆内容，可以是重要信息、笔记、总结等"
+            },
+            "type": {
+                "type": "string",
+                "description": "记忆类型（可选），例如：重要、笔记、待办等",
+                "default": "note"
+            }
+        },
+        "required": ["content"],
+        "description": "手动保存一条记忆到跨会话记忆库。当你需要记录重要的对话内容、用户的偏好或其他信息时使用此工具。"
+    })
+    async def save_memory(self, event: AstrMessageEvent, content: str, type: str = "note") -> str:
+        """手动保存记忆"""
+        if not self.enabled:
+            return "记忆功能未启用"
+
+        session_id = event.get_session_id()
+        group = self._get_group_for_session(session_id)
+
+        if not group:
+            return "当前会话未配置跨群记忆功能"
+
+        try:
+            # 格式化内容，包含记忆类型
+            formatted_content = f"[{type}] {content}"
+            
+            # 获取嵌入向量（如果启用）
+            embedding = None
+            if self.use_embedding:
+                embedding = await self._get_embedding(formatted_content)
+
+            # 创建记忆记录
+            record = MemoryRecord(
+                id=f"{session_id}_manual_{datetime.now().timestamp()}",
+                role="user",
+                content=formatted_content,
+                session_id=session_id,
+                group_name=group.name,
+                sender_name=event.get_sender_name() or "用户",
+                timestamp=datetime.now().strftime("%H:%M"),
+                embedding=embedding
+            )
+
+            # 添加到记忆组
+            group.add_memory(record)
+
+            # 保存数据
+            self._save_data()
+
+            logger.info(f"[跨会话记忆] 手动保存记忆: {session_id}")
+            return f"已保存记忆: {content[:50]}{'...' if len(content) > 50 else ''}"
+            
+        except Exception as e:
+            logger.error(f"[跨会话记忆] 保存记忆失败: {e}")
+            return f"保存记忆时出错: {str(e)}"
+
+    @filter.tool("get_memory_stats", {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "description": "获取当前会话的记忆统计信息，包括记忆数量、记忆组信息等。"
+    })
+    async def get_memory_stats(self, event: AstrMessageEvent) -> str:
+        """获取记忆统计信息"""
+        if not self.enabled:
+            return "记忆功能未启用"
+
+        session_id = event.get_session_id()
+        group = self._get_group_for_session(session_id)
+
+        if not group:
+            return "当前会话未配置跨群记忆功能"
+
+        try:
+            # 统计信息
+            total_memories = len(group.memories)
+            user_memories = len([m for m in group.memories if m.role == "user"])
+            bot_memories = len([m for m in group.memories if m.role == "assistant"])
+
+            stats = f"""【记忆统计信息】
+记忆组: {group.name}
+组成员数: {len(group.session_ids)}
+总记忆数: {total_memories}
+- 用户消息: {user_memories}
+- Bot 回复: {bot_memories}
+最大记录数: {group.max_history}
+嵌入模式: {'启用' if self.use_embedding else '禁用'}
+
+所有会话ID: {', '.join(group.session_ids)}
+"""
+            return stats
+            
+        except Exception as e:
+            logger.error(f"[跨会话记忆] 获取统计信息失败: {e}")
+            return f"获取统计信息时出错: {str(e)}"
+
+    @filter.tool("clear_memory", {
+        "type": "object",
+        "properties": {
+            "confirm": {
+                "type": "boolean",
+                "description": "确认清除操作，必须设置为 true 才能执行",
+                "default": false
+            }
+        },
+        "required": [],
+        "description": "清除当前会话所属记忆组的所有记忆记录。此操作不可逆，请谨慎使用。"
+    })
+    async def clear_memory(self, event: AstrMessageEvent, confirm: bool = False) -> str:
+        """清除记忆"""
+        if not self.enabled:
+            return "记忆功能未启用"
+
+        if not confirm:
+            return "清除操作需要确认，请将 confirm 参数设置为 true"
+
+        session_id = event.get_session_id()
+        group = self._get_group_for_session(session_id)
+
+        if not group:
+            return "当前会话未配置跨群记忆功能"
+
+        try:
+            memory_count = len(group.memories)
+            group.memories.clear()
+            self._save_data()
+
+            logger.info(f"[跨会话记忆] 已清除记忆组 [{group.name}] 的 {memory_count} 条记录")
+            return f"已清除记忆组 [{group.name}] 的所有记忆记录（共 {memory_count} 条）。"
+            
+        except Exception as e:
+            logger.error(f"[跨会话记忆] 清除记忆失败: {e}")
+            return f"清除记忆时出错: {str(e)}"
