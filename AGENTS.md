@@ -228,7 +228,7 @@
 
 ## GitHub 仓库
 
-- **仓库地址：** https://github.com/lanxuedao/astrbot_plugin_cross_session_memory
+- **仓库地址：** https://github.com/lan-xue-dao/astrbot_plugin_cross_session_memory
 - **作者：** lanxuedao
 - **版本：** 1.0.0
 - **插件 ID：** astrbot_plugin_cross_session_memory
