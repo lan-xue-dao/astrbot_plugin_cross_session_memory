@@ -480,7 +480,7 @@ class CrossSessionMemoryPlugin(Star):
 
     # ========== 函数工具（Function Calling）支持 ==========
 
-    @filter.tool("query_memory", {
+    @filter.llm_tool("query_memory", {
         "type": "object",
         "properties": {
             "query": {
@@ -537,7 +537,7 @@ class CrossSessionMemoryPlugin(Star):
             logger.error(f"[跨会话记忆] 查询记忆失败: {e}")
             return f"查询记忆时出错: {str(e)}"
 
-    @filter.tool("save_memory", {
+    @filter.llm_tool("save_memory", {
         "type": "object",
         "properties": {
             "content": {
@@ -598,7 +598,7 @@ class CrossSessionMemoryPlugin(Star):
             logger.error(f"[跨会话记忆] 保存记忆失败: {e}")
             return f"保存记忆时出错: {str(e)}"
 
-    @filter.tool("get_memory_stats", {
+    @filter.llm_tool("get_memory_stats", {
         "type": "object",
         "properties": {},
         "required": [],
@@ -638,7 +638,7 @@ class CrossSessionMemoryPlugin(Star):
             logger.error(f"[跨会话记忆] 获取统计信息失败: {e}")
             return f"获取统计信息时出错: {str(e)}"
 
-    @filter.tool("clear_memory", {
+    @filter.llm_tool("clear_memory", {
         "type": "object",
         "properties": {
             "confirm": {
